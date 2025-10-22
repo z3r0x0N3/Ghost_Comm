@@ -80,7 +80,8 @@ class PrimaryNode:
             # create ephemeral hidden service (v3) — ask stem to wait for publication optionally
             service = self.tor_controller.create_ephemeral_hidden_service(
                 {80: local_port},
-                key_type="ED25519-V3",
+                key_type="NEW",
+                key_content="ED25519-V3",
                 await_publication=await_publication
             )
 
@@ -349,4 +350,3 @@ class PrimaryNode:
         except Exception:
             pass
         print("PrimaryNode server stopped.")
-
