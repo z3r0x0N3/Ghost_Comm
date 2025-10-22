@@ -8,6 +8,7 @@ VENV_DIR="${VENV_DIR:-$PROJECT_ROOT/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TOR_CONTROL_PORT="${TOR_CONTROL_PORT:-9051}"
 TOR_SOCKS_PORT="${TOR_SOCKS_PORT:-9050}"
+LOG_FILE="${LOG_FILE:-$PROJECT_ROOT/.primary.log}"
 
 info() {
     printf '[info] %s\n' "$*"
