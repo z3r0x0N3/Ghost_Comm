@@ -78,6 +78,9 @@ class PrimaryNode:
 
         try:
             # create ephemeral hidden service (v3) — ask stem to wait for publication optionally
+            c = Controller.from_port(port=9051)
+            c.authenticate()
+
             service = self.tor_controller.create_ephemeral_hidden_service(
                 {80: local_port},
                 key_type="NEW",
