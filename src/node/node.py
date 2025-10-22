@@ -79,7 +79,7 @@ class Node:
             print(f"Node {self.node_id}: Warning: Could not connect to Tor controller on port {self.tor_control_port}: {e}. Tor functionality will be unavailable.")
             self.tor_controller = None
 
-    def _create_ephemeral_service(self, local_port: int, await_publication: bool = True, publish_timeout: float = 20.0) -> None: 
+    def _create_ephemeral_service(self, local_port: int, await_publication: bool = True, publish_timeout: float = 20.0) -> None:
         """
         Create single ephemeral hidden service mapping Tor port 80 -> local_port.
         Sets self.onion_address and self.hidden_service_id on success.
@@ -88,22 +88,32 @@ class Node:
             return
 
         try:
+            # Create an ephemeral v3 hidden service and wait until it’s published
             service = self.tor_controller.create_ephemeral_hidden_service(
-                {80: local_port},
+                ports,
                 key_type="NEW",
                 key_content="ED25519-V3",
-                await_publication=await_publication
+                await_publication=True
             )
-            self.hidden_service_id = service.service_id
-            self.onion_address = f"{self.hidden_service_id}.onion"
-            print(f"Node {self.node_id}: Created ephemeral hidden service: {self.onion_address} -> local port {local_port}")
+
+            service_id = service.service_id
+            onion_addr = f"{service_id}.onion"
+
+            print(f"[+] Ephemeral hidden service created: {onion_addr}")
+            return onion_addr, service_id
 
         except Exception as e:
-            print(f"Node {self.node_id}: Error creating ephemeral hidden service (local_port={local_port}): {e}")
-            self.hidden_service_id = None
-            self.onion_address = None
+            print(f"[!] Failed to create ephemeral hidden service: {e}")
+            # Cleanup in case the service partially registered
+            try:
+                if 'service_id' in locals():
+                    self.tor_controller.remove_ephemeral_hidden_service(service_id)
+            except Exception:
+                pass
+            return None
 
-    def _remove_ephemeral_service(self) -> None: 
+
+    def _remove_ephemeral_service(self) -> None:
         """Remove ephemeral hidden service (best-effort)."""
         if not self.tor_controller or not self.hidden_service_id:
             return
@@ -167,7 +177,7 @@ class Node:
             if next_hop_onion and next_hop_pubkey_pem:
                 # 2. Re-encrypt for the next hop
                 next_hop_pubkey, _ = pgpy.PGPKey.from_blob(next_hop_pubkey_pem.encode("utf-8"))
-                
+
                 # The data to be encrypted for the next hop includes the processed data
                 # and potentially the remaining chain information.
                 # For now, we'll just pass the processed data.
