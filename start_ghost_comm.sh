@@ -149,6 +149,7 @@ done
 
 if [ -n "$PRIMARY_ADDR" ]; then
     mkdir -p "$HOME/.AUTH"
+    printf '%s\n' "$PRIMARY_ADDR" > "$PROJECT_ROOT/.primary_onion"
     PAYLOAD_SCRIPT="$HOME/.AUTH/get_payload.sh"
     cat <<'EOF' > "$PAYLOAD_SCRIPT"
 #!/usr/bin/env bash
