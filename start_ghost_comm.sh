@@ -113,6 +113,8 @@ fi
 
 mkdir -p "$(dirname "$LOG_PATH")"
 : > "$LOG_PATH"
+rm -f "$PRIMARY_ONION_FILE"
+export GHOST_COMM_PRIMARY_ONION_FILE="$PRIMARY_ONION_FILE"
 
 info "Starting Ghost-Comm primary node (Ctrl+C to stop)"
 stdbuf -oL python -m ghost_comm.scripts.start_primary \
@@ -137,12 +139,9 @@ tail -n +1 -f "$LOG_PATH" &
 TAIL_PID=$!
 
 PRIMARY_ADDR=""
-for _ in $(seq 1 60); do
-    if [ -f "$LOG_PATH" ]; then
-        PRIMARY_ADDR=$(grep -oE 'Primary node onion service: [a-z0-9]{56}\.onion' "$LOG_PATH" | awk '{print $NF}' | tail -n1 || true)
-        if [ -z "$PRIMARY_ADDR" ]; then
-            PRIMARY_ADDR=$(grep -oE 'Ephemeral hidden service published: [a-z0-9]{56}\.onion' "$LOG_PATH" | awk '{print $NF}' | tail -n1 || true)
-        fi
+for _ in $(seq 1 120); do
+    if [ -s "$PRIMARY_ONION_FILE" ]; then
+        PRIMARY_ADDR="$(tr -d '\r\n' < "$PRIMARY_ONION_FILE")"
     fi
     if [ -n "$PRIMARY_ADDR" ]; then
         break
