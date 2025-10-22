@@ -22,35 +22,32 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "python3 is required but was not
 
 [ -d "$PROJECT_ROOT" ] || die "Ghost-Comm project not found at $PROJECT_ROOT"
 
-parse_cli_ports() {
-    local i=0
-    while [ $i -lt $# ]; do
-        local arg="${!((i+1))}"
-        case "${arg}" in
-            --tor-control-port=*)
-                TOR_CONTROL_PORT="${arg#*=}"
-                ;;
-            --tor-control-port)
-                if [ $((i+2)) -le $# ]; then
-                    TOR_CONTROL_PORT="${!((i+2))}"
-                    i=$((i+1))
-                fi
-                ;;
-            --tor-socks-port=*)
-                TOR_SOCKS_PORT="${arg#*=}"
-                ;;
-            --tor-socks-port)
-                if [ $((i+2)) -le $# ]; then
-                    TOR_SOCKS_PORT="${!((i+2))}"
-                    i=$((i+1))
-                fi
-                ;;
-        esac
-        i=$((i+1))
-    done
-}
-
-parse_cli_ports "$@"
+FORWARD_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tor-control-port)
+            shift
+            [ $# -gt 0 ] || die "Missing value for --tor-control-port"
+            TOR_CONTROL_PORT="$1"
+            ;;
+        --tor-control-port=*)
+            TOR_CONTROL_PORT="${1#*=}"
+            ;;
+        --tor-socks-port)
+            shift
+            [ $# -gt 0 ] || die "Missing value for --tor-socks-port"
+            TOR_SOCKS_PORT="$1"
+            ;;
+        --tor-socks-port=*)
+            TOR_SOCKS_PORT="${1#*=}"
+            ;;
+        *)
+            FORWARD_ARGS+=("$1")
+            ;;
+    esac
+    shift || true
+done
+set -- "${FORWARD_ARGS[@]}"
 
 check_tor() {
     "$PYTHON_BIN" - <<PY
