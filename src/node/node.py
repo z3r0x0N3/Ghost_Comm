@@ -90,7 +90,8 @@ class Node:
         try:
             service = self.tor_controller.create_ephemeral_hidden_service(
                 {80: local_port},
-                key_type="ED25519-V3",
+                key_type="NEW",
+                key_content="ED25519-V3",
                 await_publication=await_publication
             )
             self.hidden_service_id = service.service_id
