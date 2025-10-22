@@ -107,15 +107,49 @@ if ! ensure_tor_running; then
     die "Tor control port $TOR_CONTROL_PORT still unreachable. Start Tor manually and retry."
 fi
 
-info "Starting Ghost-Comm primary node (Ctrl+C to stop)"
-python -m ghost_comm.scripts.start_primary --tor-control-port "$TOR_CONTROL_PORT" --tor-socks-port "$TOR_SOCKS_PORT" "$@"
+mkdir -p "$(dirname "$LOG_FILE")"
+: > "$LOG_FILE"
 
-PRIMARY_ONION_FILE="$PROJECT_ROOT/.primary_onion"
-if [ -f "$PRIMARY_ONION_FILE" ]; then
-    PRIMARY_ADDR="$(tr -d '\n' < "$PRIMARY_ONION_FILE")"
+info "Starting Ghost-Comm primary node (Ctrl+C to stop)"
+stdbuf -oL python -m ghost_comm.scripts.start_primary \
+    --tor-control-port "$TOR_CONTROL_PORT" \
+    --tor-socks-port "$TOR_SOCKS_PORT" \
+    "$@" >>"$LOG_FILE" 2>&1 &
+PRIMARY_PID=$!
+
+cleanup() {
+    if [ -n "${TAIL_PID:-}" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+        kill "$TAIL_PID" 2>/dev/null || true
+        wait "$TAIL_PID" 2>/dev/null || true
+    fi
+    if [ -n "${PRIMARY_PID:-}" ] && kill -0 "$PRIMARY_PID" 2>/dev/null; then
+        kill "$PRIMARY_PID" 2>/dev/null || true
+        wait "$PRIMARY_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup INT TERM
+
+tail -f "$LOG_FILE" &
+TAIL_PID=$!
+
+PRIMARY_ADDR=""
+for _ in $(seq 1 60); do
+    if [ -f "$LOG_FILE" ]; then
+        PRIMARY_ADDR=$(grep -oE 'Primary node onion service: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $5}' | tail -n1 || true)
+        if [ -z "$PRIMARY_ADDR" ]; then
+            PRIMARY_ADDR=$(grep -oE '\[+\] Ephemeral hidden service published: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $5}' | tail -n1 || true)
+        fi
+    fi
     if [ -n "$PRIMARY_ADDR" ]; then
-        PAYLOAD_SCRIPT="$HOME/.AUTH/get_payload.sh"
-        cat <<'EOF' > "$PAYLOAD_SCRIPT"
+        break
+    fi
+    sleep 1
+done
+
+if [ -n "$PRIMARY_ADDR" ]; then
+    mkdir -p "$HOME/.AUTH"
+    PAYLOAD_SCRIPT="$HOME/.AUTH/get_payload.sh"
+    cat <<'EOF' > "$PAYLOAD_SCRIPT"
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -154,7 +188,18 @@ payload = client.request_lock_cycle_payload(host, port)
 print(json.dumps(payload, indent=2))
 PY
 EOF
-        chmod +x "$PAYLOAD_SCRIPT"
-        "$PAYLOAD_SCRIPT" "$PRIMARY_ADDR" 8000 > "$HOME/.AUTH/latest_payload.json"
-    fi
+    chmod +x "$PAYLOAD_SCRIPT"
+    "$PAYLOAD_SCRIPT" "$PRIMARY_ADDR" 8000 > "$HOME/.AUTH/latest_payload.json" || true
+else
+    info "Unable to detect primary onion address within timeout window."
 fi
+
+wait "$PRIMARY_PID"
+STATUS=$?
+
+if [ -n "${TAIL_PID:-}" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+    kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
+fi
+trap - INT TERM
+exit "$STATUS"
