@@ -129,15 +129,15 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-tail -f "$LOG_FILE" &
+tail -n +1 -f "$LOG_FILE" &
 TAIL_PID=$!
 
 PRIMARY_ADDR=""
 for _ in $(seq 1 60); do
     if [ -f "$LOG_FILE" ]; then
-        PRIMARY_ADDR=$(grep -oE 'Primary node onion service: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $5}' | tail -n1 || true)
+        PRIMARY_ADDR=$(grep -oE 'Primary node onion service: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $NF}' | tail -n1 || true)
         if [ -z "$PRIMARY_ADDR" ]; then
-            PRIMARY_ADDR=$(grep -oE '\[+\] Ephemeral hidden service published: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $5}' | tail -n1 || true)
+            PRIMARY_ADDR=$(grep -oE 'Ephemeral hidden service published: [a-z0-9]{56}\.onion' "$LOG_FILE" | awk '{print $NF}' | tail -n1 || true)
         fi
     fi
     if [ -n "$PRIMARY_ADDR" ]; then
