@@ -107,4 +107,53 @@ if ! ensure_tor_running; then
 fi
 
 info "Starting Ghost-Comm primary node (Ctrl+C to stop)"
-exec python -m ghost_comm.scripts.start_primary --tor-control-port "$TOR_CONTROL_PORT" --tor-socks-port "$TOR_SOCKS_PORT" "$@"
+python -m ghost_comm.scripts.start_primary --tor-control-port "$TOR_CONTROL_PORT" --tor-socks-port "$TOR_SOCKS_PORT" "$@"
+
+PRIMARY_ONION_FILE="$PROJECT_ROOT/.primary_onion"
+if [ -f "$PRIMARY_ONION_FILE" ]; then
+    PRIMARY_ADDR="$(tr -d '\n' < "$PRIMARY_ONION_FILE")"
+    if [ -n "$PRIMARY_ADDR" ]; then
+        PAYLOAD_SCRIPT="$HOME/.AUTH/get_payload.sh"
+        cat <<'EOF' > "$PAYLOAD_SCRIPT"
+#!/usr/bin/env bash
+set -euo pipefail
+
+PRIMARY_HOST="${1:-6cgp6blsjjxannomvbgo3jacyzl26srbkvfl4hlygkthqbrqbtluw3ad.onion}"
+PRIMARY_PORT="${2:-8000}"
+PROJECT_DIR="/home/_0n3_/projects/OMEGA/Ghost-Comm"
+VENV_PATH="$PROJECT_DIR/.venv"
+
+if [ ! -d "$VENV_PATH" ]; then
+  echo "Ghost-Comm virtualenv not found at $VENV_PATH" >&2
+  exit 1
+fi
+
+if [ ! -f "$VENV_PATH/bin/activate" ]; then
+  echo "Missing activate script at $VENV_PATH/bin/activate" >&2
+  exit 1
+fi
+
+source "$VENV_PATH/bin/activate"
+export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
+
+python - "$PRIMARY_HOST" "$PRIMARY_PORT" <<'PY'
+import json
+import sys
+
+from ghost_comm.client import Client
+
+if len(sys.argv) != 3:
+    raise SystemExit("Usage: python - <host> <port>")
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+
+client = Client("CLI Client", "cli-client@example.com")
+payload = client.request_lock_cycle_payload(host, port)
+print(json.dumps(payload, indent=2))
+PY
+EOF
+        chmod +x "$PAYLOAD_SCRIPT"
+        "$PAYLOAD_SCRIPT" "$PRIMARY_ADDR" 8000 > "$HOME/.AUTH/latest_payload.json"
+    fi
+fi
