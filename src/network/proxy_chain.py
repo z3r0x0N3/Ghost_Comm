@@ -1,41 +1,28 @@
 
-import sys
-import os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
-from src.node.node import Node
+from src.crypto.utils import digital_shift_cipher, hash_data
 
 class ProxyChain:
     """Manages the chain of proxy nodes."""
 
     def __init__(self, node_configs: dict, node_order: list):
         """Initializes the ProxyChain with node configurations and order."""
-        self.nodes = []
-        for node_id in node_order:
-            config = node_configs[node_id]
-            self.nodes.append(Node(node_id, config['keyword'], config['hashing_algorithm']))
+        self.node_configs = node_configs
+        self.node_order = node_order
 
     def process_data(self, data: bytes) -> bytes:
         """Processes data through the proxy chain."""
         processed_data = data
-        for node in self.nodes:
-            processed_data = node.process_data(processed_data)
+        for node_id in self.node_order:
+            config = self.node_configs[node_id]
+            shift = sum(ord(ch) for ch in config["keyword"])
+            shifted = digital_shift_cipher(processed_data, shift)
+            processed_data = hash_data(shifted, config["hashing_algorithm"])
         return processed_data
 
     def get_node_configs(self) -> dict:
         """Returns the current configuration of all nodes in the chain."""
-        configs = {}
-        for node in self.nodes:
-            configs[node.node_id] = {
-                'keyword': node.keyword,
-                'hashing_algorithm': node.hashing_algorithm
-            }
-        return configs
+        return self.node_configs
 
     def update_node_configs(self, new_node_configs: dict):
         """Updates the configuration of nodes in the chain."""
-        for node in self.nodes:
-            if node.node_id in new_node_configs:
-                config = new_node_configs[node.node_id]
-                node.set_new_config(config['keyword'], config['hashing_algorithm'])
+        self.node_configs.update(new_node_configs)

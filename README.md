@@ -62,9 +62,17 @@ To run the Python application, ensure you have Tor installed and running, and it
     ```bash
     pip install -r requirements.txt
     ```
-2.  **Run the main application:**
+2.  **Start the primary node service:**
+    ```bash
+    ./start_ghost_comm.sh
+    ```
+    The helper script bootstraps a virtual environment (if needed), ensures Tor is reachable, and launches the packaged entrypoint (`python -m ghost_comm.scripts.start_primary`). Logs are streamed to `.primary.log`, and the published onion address (when available) is written to `.primary_onion`.
+3.  **Alternative manual start (in an activated virtualenv):**
+    ```bash
+    python -m ghost_comm.scripts.start_primary --tor-control-port 9051
+    ```
+4.  **Run the end-to-end simulation:**
     ```bash
     python main.py
     ```
-
-This will start the `PrimaryNode`, its distributed `Node`s, and simulate a client communication flow.
+    This script exercises the primary node, client, and distributed node chain locally for demonstration purposes.

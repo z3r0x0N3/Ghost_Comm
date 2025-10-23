@@ -1,20 +1,21 @@
 # src/primary_node/primary_node.py
-import sys
 import os
 import json
 import random
+import subprocess
 import threading
 import time
-import pgpy
-from typing import Dict, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
-# ensure top-level package import works when running main.py from project root
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+import pgpy
+import socks
 
 from stem.control import Controller
 from src.crypto.utils import generate_aes_key, encrypt_aes, encrypt_pgp
 from src.network.server import Server
 from src.network.proxy_chain import ProxyChain
+from src.node.node import Node
 
 
 class PrimaryNode:
@@ -22,10 +23,13 @@ class PrimaryNode:
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8000,
         tor_control_port: int = 9051,
         tor_control_password: str = None,
+        tor_socks_host: str = "127.0.0.1",
+        tor_socks_port: int = 9050,
+        payload_pubkey_path: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -38,6 +42,7 @@ class PrimaryNode:
 
         # server that receives client requests (assumes Server accepts host, port, handler)
         self.server = Server(self.host, self.port, self.handle_client_request)
+        self.server_thread: Optional[threading.Thread] = None
 
         # threading / runtime control
         self.lock_cycle_thread = None
@@ -50,6 +55,14 @@ class PrimaryNode:
         # self.hidden_services maps service_id -> onion_addr (string)
         self.hidden_services: Dict[str, str] = {}
         self.distributed_nodes: Dict[str, Node] = {}
+        self.onion_address: Optional[str] = None
+        self.tor_socks_host = tor_socks_host
+        self.tor_socks_port = tor_socks_port
+        default_pubkey_path = Path(payload_pubkey_path or os.path.join(os.path.expanduser("~"), ".AUTH", "Z3R0-public-key.asc"))
+        self.payload_pubkey_path = default_pubkey_path.expanduser()
+        self.latest_payload: Optional[Dict[str, str]] = None
+        self._payload_pubkey_warning_logged = False
+        self.project_root = Path(__file__).resolve().parents[2]
 
         # attempt to connect to Tor controller at init
         self._connect_to_tor_controller()
@@ -77,10 +90,6 @@ class PrimaryNode:
             return None
 
         try:
-            # create ephemeral hidden service (v3) — ask stem to wait for publication optionally
-            c = Controller.from_port(port=9051)
-            c.authenticate()
-
             service = self.tor_controller.create_ephemeral_hidden_service(
                 {80: local_port},
                 key_type="NEW",
@@ -91,7 +100,6 @@ class PrimaryNode:
             service_id = service.service_id
             onion_addr = f"{service_id}.onion"
 
-            # if await_publication was False, verify published manually
             if not await_publication:
                 deadline = time.time() + publish_timeout
                 published = False
@@ -105,7 +113,6 @@ class PrimaryNode:
                         pass
                     time.sleep(0.3)
                 if not published:
-                    # try cleaning up and report failure
                     try:
                         self.tor_controller.remove_ephemeral_hidden_service(service_id)
                     except Exception:
@@ -139,6 +146,143 @@ class PrimaryNode:
             print(f"PrimaryNode: Warning: could not remove ephemeral hidden service {service_id}: {e}")
         finally:
             self.hidden_services.pop(service_id, None)
+
+    def _load_payload_pubkey(self) -> Optional[str]:
+        """Read the public key used to request payloads, logging warnings once."""
+        try:
+            key_text = self.payload_pubkey_path.read_text(encoding="utf-8")
+            self._payload_pubkey_warning_logged = False
+            return key_text
+        except FileNotFoundError:
+            if not self._payload_pubkey_warning_logged:
+                print(f"PrimaryNode: Warning: payload public key not found at {self.payload_pubkey_path}")
+                self._payload_pubkey_warning_logged = True
+            return None
+        except OSError as exc:
+            if not self._payload_pubkey_warning_logged:
+                print(f"PrimaryNode: Warning: could not read payload public key ({exc})")
+                self._payload_pubkey_warning_logged = True
+            return None
+
+    def _retrieve_payload_via_onion(self) -> bool:
+        """
+        Fetch the latest payload from the primary node's own onion endpoint, if available.
+        Stores the JSON response in self.latest_payload.
+        """
+        if not self.onion_address:
+            return False
+
+        pubkey_text = self._load_payload_pubkey()
+        if not pubkey_text:
+            return False
+
+        request_body = json.dumps({
+            "type": "get_payload",
+            "pub_key": pubkey_text,
+        }).encode("utf-8")
+
+        host = self.onion_address
+        request_lines = [
+            "POST /payload HTTP/1.1",
+            f"Host: {host}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(request_body)}",
+            "Connection: close",
+            "",
+            "",
+        ]
+        request_bytes = "\r\n".join(request_lines).encode("utf-8") + request_body
+
+        sock: Optional[socks.socksocket] = None
+        try:
+            sock = socks.socksocket()
+            sock.set_proxy(socks.SOCKS5, self.tor_socks_host, self.tor_socks_port, rdns=True)
+            sock.settimeout(30)
+            sock.connect((host, 80))
+            sock.sendall(request_bytes)
+
+            response_chunks = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response_chunks.append(chunk)
+            response_data = b"".join(response_chunks)
+        except Exception as exc:
+            print(f"PrimaryNode: Warning: failed to retrieve payload via onion {host}: {exc}")
+            return False
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+        header_bytes, sep, body = response_data.partition(b"\r\n\r\n")
+        if not sep:
+            print("PrimaryNode: Warning: invalid HTTP response when retrieving payload via onion.")
+            return False
+
+        try:
+            status_line = header_bytes.decode("iso-8859-1").splitlines()[0]
+            status_code = int(status_line.split(" ", 2)[1])
+        except Exception:
+            print("PrimaryNode: Warning: could not parse status line from payload response.")
+            return False
+
+        if status_code != 200:
+            preview = body[:160].decode("utf-8", errors="replace")
+            print(f"PrimaryNode: Warning: payload endpoint returned status {status_code}. Body preview: {preview}")
+            return False
+
+        try:
+            payload_json = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            print(f"PrimaryNode: Warning: could not decode payload JSON: {exc}")
+            return False
+
+        self.latest_payload = payload_json
+        print("PrimaryNode: Retrieved lock-cycle payload via onion.")
+        return True
+
+    def _run_payload_pipeline(self, endpoint: str) -> None:
+        """Invoke external helper scripts to fetch/decrypt payload and persist JSON."""
+        get_script = self.project_root / "get_primary_payload.sh"
+        decrypt_script = self.project_root / "decrypt_primary_payload.sh"
+        target_path = Path.home() / ".AUTH" / "Network_Access_Payload.json"
+
+        if not get_script.exists() or not decrypt_script.exists():
+            return
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload_cache = self.project_root / "payload.json"
+
+        command = (
+            f'"{get_script}" "{endpoint}" > "{payload_cache}" && '
+            f'bash "{decrypt_script}" "{payload_cache}" > "{target_path}"'
+        )
+
+        env = os.environ.copy()
+        env.setdefault("TOR_SOCKS_HOST", str(self.tor_socks_host))
+        env.setdefault("TOR_SOCKS_PORT", str(self.tor_socks_port))
+        if "GPG_TTY" not in env:
+            try:
+                if os.isatty(0):
+                    env["GPG_TTY"] = os.ttyname(0)
+            except OSError:
+                pass
+
+        try:
+            subprocess.run(
+                ["bash", "-lc", command],
+                check=True,
+                cwd=str(self.project_root),
+                env=env,
+            )
+            print(f"PrimaryNode: Updated decrypted payload at {target_path}")
+        except subprocess.CalledProcessError as exc:
+            print(f"PrimaryNode: Warning: failed to update decrypted payload via helper scripts: {exc}")
 
     # -------------------------- Lock-cycle onion creation --------------------------
     def create_lock_cycle_onions(self, count: int = 6, local_port: int | None = None, publish_timeout: float = 20.0) -> Dict[str, Tuple[str, str]]:
@@ -233,6 +377,10 @@ class PrimaryNode:
         # For now, we'll keep it as is, but it will be refactored later.
         self.proxy_chain = ProxyChain(self.proxy_chain_config["node_configs"], self.proxy_chain_config["node_order"])
         print(f"PrimaryNode: create_lock_cycle_onions: created {len(created_node_info)} distributed nodes, primary_node_url={self.proxy_chain_config['primary_node_url']}")
+        # Retrieve the payload via the primary onion so we always have the latest encrypted bundle.
+        self._retrieve_payload_via_onion()
+        endpoint = f"http://{self.onion_address}/payload" if self.onion_address else f"http://{self.host}:{self.port}/payload"
+        self._run_payload_pipeline(endpoint)
         return created_node_info
 
     # -------------------------- Other existing logic --------------------------
@@ -293,15 +441,166 @@ class PrimaryNode:
             except Exception as e:
                 print(f"PrimaryNode: Lock-cycle worker encountered an error: {e}")
 
+    def _http_response(self, status_code: int, reason: str, body: bytes, content_type: str = "text/plain") -> bytes:
+        """Format a minimal HTTP/1.1 response."""
+        headers = [
+            f"HTTP/1.1 {status_code} {reason}",
+            f"Content-Length: {len(body)}",
+            f"Content-Type: {content_type}",
+            "Connection: close",
+        ]
+        return ("\r\n".join(headers) + "\r\n\r\n").encode("utf-8") + body
+
+    def _parse_http_request(self, data: bytes) -> Optional[Dict[str, object]]:
+        """
+        Parse a simple HTTP request into its components.
+        Supports curl-style GET/POST with Content-Length.
+        """
+        header_body_split = b"\r\n\r\n"
+        if header_body_split in data:
+            header_bytes, body = data.split(header_body_split, 1)
+        elif b"\n\n" in data:
+            header_bytes, body = data.split(b"\n\n", 1)
+        else:
+            return None
+
+        try:
+            header_text = header_bytes.decode("iso-8859-1")
+        except UnicodeDecodeError:
+            return None
+
+        lines = header_text.split("\r\n")
+        if len(lines) == 1:
+            lines = header_text.split("\n")
+        if not lines or not lines[0]:
+            return None
+
+        try:
+            method, path, version = lines[0].split(" ", 2)
+        except ValueError:
+            return None
+
+        headers: Dict[str, str] = {}
+        for line in lines[1:]:
+            if not line:
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+
+        content_length = 0
+        if "content-length" in headers:
+            try:
+                content_length = int(headers["content-length"])
+            except ValueError:
+                return None
+
+        if content_length and len(body) < content_length:
+            return None
+        if content_length:
+            body = body[:content_length]
+
+        return {
+            "method": method,
+            "path": path,
+            "version": version,
+            "headers": headers,
+            "body": body,
+        }
+
     def handle_client_request(self, data: bytes) -> bytes:
         """Handle incoming client requests from Server."""
-        request = json.loads(data.decode("utf-8"))
+        if data.startswith(b"GET ") or data.startswith(b"POST "):
+            http_request = self._parse_http_request(data)
+            if not http_request:
+                return self._http_response(
+                    400,
+                    "Bad Request",
+                    b'{"error":"bad request"}',
+                    content_type="application/json",
+                )
+
+            method = http_request["method"]
+            path = str(http_request["path"]).split("?", 1)[0]
+            headers = http_request["headers"]
+            body = http_request["body"]
+
+            if method == "GET" and path == "/":
+                return self._http_response(
+                    200,
+                    "OK",
+                    b"Ghost-Comm Primary Node Active\n",
+                    content_type="text/plain",
+                )
+
+            if method == "GET" and path == "/health":
+                health = {
+                    "status": "ok",
+                    "primary_onion": self.onion_address,
+                    "port": self.port,
+                    "nodes": list(self.distributed_nodes.keys()),
+                }
+                return self._http_response(
+                    200,
+                    "OK",
+                    json.dumps(health).encode("utf-8"),
+                    content_type="application/json",
+                )
+
+            if method == "POST" and path == "/payload":
+                content_type = headers.get("content-type", "")
+                if "application/json" not in content_type:
+                    return self._http_response(
+                        415,
+                        "Unsupported Media Type",
+                        b'{"error":"expected application/json"}',
+                        content_type="application/json",
+                    )
+                try:
+                    payload_request = json.loads(body.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return self._http_response(
+                        400,
+                        "Bad Request",
+                        b'{"error":"invalid json"}',
+                        content_type="application/json",
+                    )
+
+                if payload_request.get("type") == "get_payload" and "pub_key" in payload_request:
+                    client_pub_key_pem = payload_request["pub_key"].encode("utf-8")
+                    response = self.get_lock_cycle_payload(client_pub_key_pem)
+                    return self._http_response(
+                        200,
+                        "OK",
+                        response,
+                        content_type="application/json",
+                    )
+                return self._http_response(
+                    400,
+                    "Bad Request",
+                    b'{"error":"invalid payload request"}',
+                    content_type="application/json",
+                )
+
+            return self._http_response(
+                404,
+                "Not Found",
+                b'{"error":"not found"}',
+                content_type="application/json",
+            )
+
+        try:
+            request = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return b"PrimaryNode: Error: Invalid JSON request"
+
         if request.get("type") == "get_payload":
             client_pub_key_pem = request["pub_key"].encode("utf-8")
             response = self.get_lock_cycle_payload(client_pub_key_pem)
             print(f"PrimaryNode: Sending payload to client.")
             return response
-        elif request.get("type") == "process_data":
+        if request.get("type") == "process_data":
             # This branch is now deprecated as clients will directly interact with distributed nodes.
             # However, for backward compatibility or direct processing by PrimaryNode, we can keep it.
             print("PrimaryNode: Received 'process_data' request. This should now go to distributed nodes.")
@@ -313,11 +612,18 @@ class PrimaryNode:
         """Start server and lock-cycle worker."""
         self.running = True
         # Start PrimaryNode's own server
-        threading.Thread(target=self.server.start, daemon=True).start()
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        while self.server.port == 0:
+            time.sleep(0.05)
+        self.port = self.server.port
+
         # Create PrimaryNode's own onion service
         if self.tor_controller:
-            onion_addr, service_id = self._create_ephemeral_service(self.port)
-            self.onion_address = onion_addr # Store PrimaryNode's own onion address
+            result = self._create_ephemeral_service(self.port)
+            if result:
+                onion_addr, service_id = result
+                self.onion_address = onion_addr  # Store PrimaryNode's own onion address
 
         self.lock_cycle_thread = threading.Thread(target=self._lock_cycle_worker, daemon=True)
         self.lock_cycle_thread.start()
@@ -347,9 +653,22 @@ class PrimaryNode:
                 self.tor_controller.close()
             except Exception:
                 pass
+            self.tor_controller = None
         # stop server
-        try:
+        if self.server:
             self.server.stop()
-        except Exception:
-            pass
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(timeout=2)
+        if self.lock_cycle_thread and self.lock_cycle_thread.is_alive():
+            self.lock_cycle_thread.join(timeout=2)
         print("PrimaryNode server stopped.")
+
+    def _persist_onion_address(self, onion_addr: str) -> None:
+        target = os.getenv("GHOST_COMM_PRIMARY_ONION_FILE")
+        if not target:
+            return
+        try:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(onion_addr + "\n")
+        except OSError as exc:
+            print(f"PrimaryNode: Warning: failed to write onion address to {target}: {exc}")

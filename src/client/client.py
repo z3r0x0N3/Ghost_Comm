@@ -5,6 +5,7 @@ import socks
 import socket
 import time
 from typing import Dict, Any
+import pgpy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
