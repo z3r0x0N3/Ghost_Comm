@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
         default="~/.AUTH/Z3R0-public-key.asc",
         help="Path to the PGP public key used when retrieving the payload after each lock cycle.",
     )
+    parser.add_argument(
+        "--ui-html",
+        default=None,
+        help="Path to an HTML file to serve at the primary node root endpoint.",
+    )
     return parser.parse_args()
 
 
@@ -39,6 +44,7 @@ def main() -> None:
         tor_socks_host=args.tor_socks_host,
         tor_socks_port=args.tor_socks_port,
         payload_pubkey_path=args.payload_pubkey_path,
+        ui_html_path=args.ui_html,
     )
     primary.start_server()
 

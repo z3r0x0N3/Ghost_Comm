@@ -1,6 +1,7 @@
 # src/primary_node/primary_node.py
-import os
 import json
+import mimetypes
+import os
 import random
 import subprocess
 import threading
@@ -30,11 +31,13 @@ class PrimaryNode:
         tor_socks_host: str = "127.0.0.1",
         tor_socks_port: int = 9050,
         payload_pubkey_path: str | None = None,
+        ui_html_path: str | Path | None = None,
     ):
         self.host = host
         self.port = port
         self.node_keywords = [f"keyword_{i}" for i in range(8)]
         self.hashing_algorithms = ["sha256", "sha512", "sha3_256"]
+        self.project_root = Path(__file__).resolve().parents[2]
 
         # initial proxy chain configuration (will be replaced on first lock cycle)
         self.proxy_chain_config = self.generate_proxy_chain_config()
@@ -62,7 +65,9 @@ class PrimaryNode:
         self.payload_pubkey_path = default_pubkey_path.expanduser()
         self.latest_payload: Optional[Dict[str, str]] = None
         self._payload_pubkey_warning_logged = False
-        self.project_root = Path(__file__).resolve().parents[2]
+        self.ui_html_path = self._resolve_ui_html_path(ui_html_path)
+        self.ui_root_dir = self.ui_html_path.parent.resolve() if self.ui_html_path else None
+        self._ui_html_warning_logged = False
 
         # attempt to connect to Tor controller at init
         self._connect_to_tor_controller()
@@ -146,6 +151,125 @@ class PrimaryNode:
             print(f"PrimaryNode: Warning: could not remove ephemeral hidden service {service_id}: {e}")
         finally:
             self.hidden_services.pop(service_id, None)
+
+    def _resolve_ui_html_path(self, ui_html_path: str | Path | None) -> Optional[Path]:
+        """Determine which UI HTML file to serve for GET / requests."""
+        candidates: list[Path] = []
+
+        if ui_html_path:
+            candidates.append(Path(ui_html_path).expanduser())
+
+        env_path = os.environ.get("GHOST_COMM_PRIMARY_UI")
+        if env_path:
+            env_candidate = Path(env_path).expanduser()
+            if env_candidate not in candidates:
+                candidates.append(env_candidate)
+
+        default_external = Path(os.path.expanduser("~/projects/botnet/WEB-GUI/GUI-index.html"))
+        if default_external not in candidates:
+            candidates.append(default_external)
+
+        default_internal = self.project_root / "GUI-index.html"
+        if default_internal not in candidates:
+            candidates.append(default_internal)
+
+        for candidate in candidates:
+            if candidate.is_dir():
+                for default_name in ("index.html", "GUI-index.html"):
+                    default_candidate = candidate / default_name
+                    if default_candidate.is_file():
+                        resolved = default_candidate.resolve()
+                        print(f"PrimaryNode: Serving UI from {resolved}")
+                        return resolved
+                continue
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                print(f"PrimaryNode: Serving UI from {resolved}")
+                return resolved
+
+        if candidates:
+            print("PrimaryNode: Warning: no UI HTML file found in candidates: " + ", ".join(str(path) for path in candidates))
+
+        return None
+
+    def _safe_ui_path(self, relative_path: str) -> Optional[Path]:
+        """Resolve UI asset path without allowing directory traversal."""
+        if not self.ui_root_dir:
+            return None
+        base = self.ui_root_dir
+        candidate = (base / relative_path).resolve()
+        if base == candidate or base in candidate.parents:
+            return candidate
+        return None
+
+    def _get_ui_asset(self, request_path: str) -> Optional[tuple[bytes, str]]:
+        """Return bytes and content-type for the requested UI asset, if available."""
+        if not self.ui_html_path:
+            return None
+
+        path_only = request_path.split("?", 1)[0].split("#", 1)[0]
+        if path_only in ("", "/", "/index.html"):
+            html_body = self._load_ui_html()
+            if html_body is None:
+                return None
+            return html_body, "text/html; charset=utf-8"
+
+        relative_path = path_only.lstrip("/")
+        if not relative_path:
+            html_body = self._load_ui_html()
+            if html_body is None:
+                return None
+            return html_body, "text/html; charset=utf-8"
+
+        if relative_path.endswith("/"):
+            relative_path = relative_path.rstrip("/") + "/index.html"
+
+        safe_path = self._safe_ui_path(relative_path)
+        if not safe_path or not safe_path.is_file():
+            # If the target is a directory, try default index files.
+            if safe_path and safe_path.is_dir():
+                for default_name in ("index.html", "GUI-index.html"):
+                    default_path = safe_path / default_name
+                    if default_path.is_file():
+                        safe_path = default_path
+                        break
+                else:
+                    return None
+            else:
+                # Allow implicit .html extension lookup.
+                html_candidate = self._safe_ui_path(relative_path + ".html")
+                if html_candidate and html_candidate.is_file():
+                    safe_path = html_candidate
+                else:
+                    return None
+
+        try:
+            data = safe_path.read_bytes()
+        except OSError as exc:
+            print(f"PrimaryNode: Warning: could not read UI asset {safe_path}: {exc}")
+            return None
+
+        content_type = mimetypes.guess_type(str(safe_path))[0] or "application/octet-stream"
+        if content_type == "text/html":
+            content_type = "text/html; charset=utf-8"
+        elif content_type == "text/css":
+            content_type = "text/css; charset=utf-8"
+
+        return data, content_type
+
+    def _load_ui_html(self) -> Optional[bytes]:
+        """Read the UI HTML content from disk."""
+        if not self.ui_html_path:
+            return None
+        try:
+            data = self.ui_html_path.read_bytes()
+            self._ui_html_warning_logged = False
+            return data
+        except OSError as exc:
+            if not self._ui_html_warning_logged:
+                print(f"PrimaryNode: Warning: could not read UI HTML at {self.ui_html_path}: {exc}")
+                self._ui_html_warning_logged = True
+            return None
 
     def _load_payload_pubkey(self) -> Optional[str]:
         """Read the public key used to request payloads, logging warnings once."""
@@ -526,14 +650,6 @@ class PrimaryNode:
             headers = http_request["headers"]
             body = http_request["body"]
 
-            if method == "GET" and path == "/":
-                return self._http_response(
-                    200,
-                    "OK",
-                    b"Ghost-Comm Primary Node Active\n",
-                    content_type="text/plain",
-                )
-
             if method == "GET" and path == "/health":
                 health = {
                     "status": "ok",
@@ -547,6 +663,24 @@ class PrimaryNode:
                     json.dumps(health).encode("utf-8"),
                     content_type="application/json",
                 )
+
+            if method == "GET":
+                asset = self._get_ui_asset(path)
+                if asset is not None:
+                    body, content_type = asset
+                    return self._http_response(
+                        200,
+                        "OK",
+                        body,
+                        content_type=content_type,
+                    )
+                if path in ("/", "/index.html"):
+                    return self._http_response(
+                        200,
+                        "OK",
+                        b"Ghost-Comm Primary Node Active\n",
+                        content_type="text/plain",
+                    )
 
             if method == "POST" and path == "/payload":
                 content_type = headers.get("content-type", "")
@@ -624,6 +758,7 @@ class PrimaryNode:
             if result:
                 onion_addr, service_id = result
                 self.onion_address = onion_addr  # Store PrimaryNode's own onion address
+                self._persist_onion_address(onion_addr)
 
         self.lock_cycle_thread = threading.Thread(target=self._lock_cycle_worker, daemon=True)
         self.lock_cycle_thread.start()
@@ -664,11 +799,23 @@ class PrimaryNode:
         print("PrimaryNode server stopped.")
 
     def _persist_onion_address(self, onion_addr: str) -> None:
-        target = os.getenv("GHOST_COMM_PRIMARY_ONION_FILE")
-        if not target:
-            return
-        try:
-            with open(target, "w", encoding="utf-8") as fh:
-                fh.write(onion_addr + "\n")
-        except OSError as exc:
-            print(f"PrimaryNode: Warning: failed to write onion address to {target}: {exc}")
+        env_target = os.getenv("GHOST_COMM_PRIMARY_ONION_FILE")
+        targets = []
+        if env_target:
+            targets.append(Path(env_target).expanduser())
+
+        control_url_path = Path.home() / "CONTROL-URL"
+        targets.append(control_url_path)
+
+        written = False
+        for target_path in targets:
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(target_path, "w", encoding="utf-8") as fh:
+                    fh.write(onion_addr + "\n")
+                written = True
+            except OSError as exc:
+                print(f"PrimaryNode: Warning: failed to write onion address to {target_path}: {exc}")
+
+        if not written:
+            print("PrimaryNode: Warning: onion address could not be persisted to any target path.")

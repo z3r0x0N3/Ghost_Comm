@@ -82,7 +82,7 @@ if [[ ! -r "${PAYLOAD_FILE}" ]]; then
     exit 1
 fi
 
-python3 - "$PAYLOAD_FILE" "$TOR_SOCKS_HOST" "$TOR_SOCKS_PORT" "$SCRIPT_DIR" <<'PY'
+python3 - "$PAYLOAD_FILE" "$TOR_SOCKS_HOST" "$TOR_SOCKS_PORT" "$SCRIPT_DIR" "$MESSAGE_FILE" <<'PY'
 import json
 import os
 import socket
@@ -102,7 +102,8 @@ from src.crypto.utils import encrypt_pgp
 payload_path = Path(sys.argv[1])
 tor_host = sys.argv[2]
 tor_port = int(sys.argv[3])
-message = sys.stdin.buffer.read()
+message_path = Path(sys.argv[5])
+message = message_path.read_bytes()
 
 if not message:
     raise SystemExit("Error: no message data received.")
@@ -170,4 +171,4 @@ if status == "final_processed":
 else:
     print("Unexpected response from chain:", response_json, file=sys.stderr)
     sys.exit(1)
-PY < "${MESSAGE_FILE}"
+PY

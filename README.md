@@ -54,6 +54,16 @@ The `create_torsite.sh` script is a **separate utility** that sets up *persisten
 
 **`create_torsite.sh` is NOT integrated with the Python application's communication flow.** It serves as an example or a utility for setting up a *different type* of Tor hidden service (e.g., for hosting static content or for testing persistent services independently). Running it will create separate Tor hidden services that are distinct from those managed by the Python application.
 
+### Updating torsite HTML
+
+When you need to refresh the static content served by one of the persistent torsite hidden services, use `update_torsite_html.py`:
+
+```bash
+python update_torsite_html.py <onion-address> path/to/new_content.html
+```
+
+The script locates the matching `tor_data_*` directory under `NODES/torsite`, overwrites the sibling `html_*` directory's `index.html`, and reports the target path. Pass `--backup` to retain the previous file with a timestamped `.bak` suffix.
+
 ## Getting Started
 
 To run the Python application, ensure you have Tor installed and running, and its control port (default 9051) is accessible.
